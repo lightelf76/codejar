@@ -3,6 +3,7 @@ const globalWindow = window
 type Options = {
   tab: string
   indentOn: RegExp
+  moveToNewLine: RegExp
   spellcheck: boolean
   catchTab: boolean
   preserveIdent: boolean
@@ -27,7 +28,8 @@ export type CodeJar = ReturnType<typeof CodeJar>
 export function CodeJar(editor: HTMLElement, highlight: (e: HTMLElement, pos?: Position) => void, opt: Partial<Options> = {}) {
   const options: Options = {
     tab: '\t',
-    indentOn: /{$/,
+    indentOn: /[({\[]$/,
+    moveToNewLine: /^[)}\]]/,
     spellcheck: false,
     catchTab: true,
     preserveIdent: true,
@@ -46,17 +48,19 @@ export function CodeJar(editor: HTMLElement, highlight: (e: HTMLElement, pos?: P
   let focus = false
   let callback: (code: string) => void | undefined
   let prev: string // code content prior keydown event
-  let isFirefox = navigator.userAgent.toLowerCase().indexOf('firefox') > -1
 
-  editor.setAttribute('contentEditable', isFirefox ? 'true' : 'plaintext-only')
+  editor.setAttribute('contenteditable', 'plaintext-only')
   editor.setAttribute('spellcheck', options.spellcheck ? 'true' : 'false')
   editor.style.outline = 'none'
   editor.style.overflowWrap = 'break-word'
   editor.style.overflowY = 'auto'
-  editor.style.resize = 'vertical'
   editor.style.whiteSpace = 'pre-wrap'
 
+  let isLegacy = false // true if plaintext-only is not supported
+
   highlight(editor)
+  if (editor.contentEditable !== 'plaintext-only') isLegacy = true
+  if (isLegacy) editor.setAttribute('contenteditable', 'true')
 
   const debounceHighlight = debounce(() => {
     const pos = save()
@@ -89,7 +93,7 @@ export function CodeJar(editor: HTMLElement, highlight: (e: HTMLElement, pos?: P
 
     prev = toString()
     if (options.preserveIdent) handleNewLine(event)
-    else firefoxNewLineFix(event)
+    else legacyNewLineFix(event)
     if (options.catchTab) handleTabCharacters(event)
     if (options.addClosing) handleSelfClosingCharacters(event)
     if (options.history) {
@@ -99,6 +103,8 @@ export function CodeJar(editor: HTMLElement, highlight: (e: HTMLElement, pos?: P
         recording = true
       }
     }
+
+    if (isLegacy) restore(save())
   })
 
   on('keyup', event => {
@@ -129,23 +135,50 @@ export function CodeJar(editor: HTMLElement, highlight: (e: HTMLElement, pos?: P
     const s = getSelection()
     const pos: Position = {start: 0, end: 0, dir: undefined}
 
+    let {anchorNode, anchorOffset, focusNode, focusOffset} = s
+    if (!anchorNode || !focusNode) throw 'error1'
+
+    // If the anchor and focus are the editor element, return either a full
+    // highlight or a start/end cursor position depending on the selection
+    if (anchorNode === editor && focusNode === editor) {
+      pos.start = (anchorOffset > 0 && editor.textContent) ? editor.textContent.length : 0
+      pos.end = (focusOffset > 0 && editor.textContent) ? editor.textContent.length : 0
+      pos.dir = (focusOffset >= anchorOffset) ? '->' : '<-'
+      return pos
+    }
+
+    // Selection anchor and focus are expected to be text nodes,
+    // so normalize them.
+    if (anchorNode.nodeType === Node.ELEMENT_NODE) {
+      const node = document.createTextNode('')
+      anchorNode.insertBefore(node, anchorNode.childNodes[anchorOffset])
+      anchorNode = node
+      anchorOffset = 0
+    }
+    if (focusNode.nodeType === Node.ELEMENT_NODE) {
+      const node = document.createTextNode('')
+      focusNode.insertBefore(node, focusNode.childNodes[focusOffset])
+      focusNode = node
+      focusOffset = 0
+    }
+
     visit(editor, el => {
-      if (el === s.anchorNode && el === s.focusNode) {
-        pos.start += s.anchorOffset
-        pos.end += s.focusOffset
-        pos.dir = s.anchorOffset <= s.focusOffset ? '->' : '<-'
+      if (el === anchorNode && el === focusNode) {
+        pos.start += anchorOffset
+        pos.end += focusOffset
+        pos.dir = anchorOffset <= focusOffset ? '->' : '<-'
         return 'stop'
       }
 
-      if (el === s.anchorNode) {
-        pos.start += s.anchorOffset
+      if (el === anchorNode) {
+        pos.start += anchorOffset
         if (!pos.dir) {
           pos.dir = '->'
         } else {
           return 'stop'
         }
-      } else if (el === s.focusNode) {
-        pos.end += s.focusOffset
+      } else if (el === focusNode) {
+        pos.end += focusOffset
         if (!pos.dir) {
           pos.dir = '<-'
         } else {
@@ -158,6 +191,9 @@ export function CodeJar(editor: HTMLElement, highlight: (e: HTMLElement, pos?: P
         if (pos.dir != '<-') pos.end += el.nodeValue!.length
       }
     })
+
+    // collapse empty text nodes
+    editor.normalize()
 
     return pos
   }
@@ -184,12 +220,12 @@ export function CodeJar(editor: HTMLElement, highlight: (e: HTMLElement, pos?: P
       if (el.nodeType !== Node.TEXT_NODE) return
 
       const len = (el.nodeValue || '').length
-      if (current + len >= pos.start) {
+      if (current + len > pos.start) {
         if (!startNode) {
           startNode = el
           startOffset = pos.start - current
         }
-        if (current + len >= pos.end) {
+        if (current + len > pos.end) {
           endNode = el
           endOffset = pos.end - current
           return 'stop'
@@ -198,9 +234,8 @@ export function CodeJar(editor: HTMLElement, highlight: (e: HTMLElement, pos?: P
       current += len
     })
 
-    // If everything deleted place cursor at editor
-    if (!startNode) startNode = editor
-    if (!endNode) endNode = editor
+    if (!startNode) startNode = editor, startOffset = editor.childNodes.length
+    if (!endNode) endNode = editor, endOffset = editor.childNodes.length
 
     // Flip back the selection
     if (pos.dir == '<-') {
@@ -237,7 +272,6 @@ export function CodeJar(editor: HTMLElement, highlight: (e: HTMLElement, pos?: P
       let newLinePadding = padding
 
       // If last symbol is "{" ident new line
-      // Allow user defines indent rule
       if (options.indentOn.test(before)) {
         newLinePadding += options.tab
       }
@@ -248,11 +282,11 @@ export function CodeJar(editor: HTMLElement, highlight: (e: HTMLElement, pos?: P
         event.stopPropagation()
         insert('\n' + newLinePadding)
       } else {
-        firefoxNewLineFix(event)
+        legacyNewLineFix(event)
       }
 
       // Place adjacent "}" on next line
-      if (newLinePadding !== padding && after[0] === '}') {
+      if (newLinePadding !== padding && options.moveToNewLine.test(after)) {
         const pos = save()
         insert('\n' + padding)
         restore(pos)
@@ -260,10 +294,10 @@ export function CodeJar(editor: HTMLElement, highlight: (e: HTMLElement, pos?: P
     }
   }
 
-  function firefoxNewLineFix(event: KeyboardEvent) {
+  function legacyNewLineFix(event: KeyboardEvent) {
     // Firefox does not support plaintext-only mode
     // and puts <div><br></div> on Enter. Let's help.
-    if (isFirefox && event.key === 'Enter') {
+    if (isLegacy && event.key === 'Enter') {
       preventDefault(event)
       event.stopPropagation()
       if (afterCursor() == '') {
@@ -385,7 +419,11 @@ export function CodeJar(editor: HTMLElement, highlight: (e: HTMLElement, pos?: P
     const pos = save()
     insert(text)
     highlight(editor)
-    restore({start: pos.start + text.length, end: pos.start + text.length})
+    restore({
+      start: Math.min(pos.start, pos.end) + text.length,
+      end: Math.min(pos.start, pos.end) + text.length,
+      dir: '<-',
+    })
   }
 
 
@@ -412,11 +450,11 @@ export function CodeJar(editor: HTMLElement, highlight: (e: HTMLElement, pos?: P
   }
 
   function isUndo(event: KeyboardEvent) {
-    return isCtrl(event) && !event.shiftKey && event.key === 'z'
+    return isCtrl(event) && !event.shiftKey && event.code === 'KeyZ'
   }
 
   function isRedo(event: KeyboardEvent) {
-    return isCtrl(event) && event.shiftKey && event.key === 'z'
+    return isCtrl(event) && event.shiftKey && event.code === 'KeyZ'
   }
 
   function insert(text: string) {
@@ -464,8 +502,8 @@ export function CodeJar(editor: HTMLElement, highlight: (e: HTMLElement, pos?: P
   }
 
   return {
-    updateOptions(options: Partial<Options>) {
-      options = {...options, ...options}
+    updateOptions(newOptions: Partial<Options>) {
+      Object.assign(options, newOptions)
     },
     updateCode(code: string) {
       editor.textContent = code

@@ -34,11 +34,11 @@ Create an element and init the CodeJar 🍯:
 ```html
 <div class="editor"></div>
 <script>
-  let jar = CodeJar(document.querySelector('.editor'), Prism.highlightElement)
+  let jar = CodeJar(document.querySelector('.editor'), hljs.highlightElement)
 </script>
 ```
 
-Second argument to `CodeJar` is a highlighting function (in this example [PrismJS](https://prismjs.com)), but any function may be used:
+Second argument to `CodeJar` is a highlighting function (in this example [highlight.js](https://highlightjs.org)), but any function may be used:
 
 ```ts
 const highlight = (editor: HTMLElement) => {
@@ -53,8 +53,8 @@ let jar = CodeJar(editor, highlight)
 Third argument to `CodeJar` is options:
   - `tab: string` replaces "tabs" with given string. Default: `\t`.
     - Note: use css rule `tab-size` to customize size.
-  - `indentOn: RegExp` allows auto indent rule to be customized. Default `{$`.
-    - Auto-tab if the text before cursor match the given regex while pressing Enter.
+  - `indentOn: RegExp` allows auto indent rule to be customized. Default `/[({\[]$/`.
+  - `moveToNewLine: RegExp` checks in extra newline character need to be added. Default `/^[)}\]]/`.
   - `spellcheck: boolean` enables spellchecking on the editor. Default `false`.
   - `catchTab: boolean` catches Tab keypress events and replaces it with `tab` string. Default: `true`.
   - `preserveIdent: boolean` keeps indent levels on new line. Default `true`.
@@ -152,7 +152,8 @@ Removes event listeners from editor.
 
 ## Related
 
-* [react-codejar](https://github.com/guilhermelimak/react-codejar)
+* [react-codejar](https://github.com/guilhermelimak/react-codejar) - a react wrapper for CodeJar. 
+* [ngx-codejar](https://github.com/julianpoemp/ngx-codejar) - an angular wrapper for CodeJar. 
 
 ## License
 
