@@ -36,17 +36,17 @@ export function CodeJar(editor: HTMLElement, highlight: (e: HTMLElement, pos?: P
     addClosing: true,
     history: true,
     window: globalWindow,
-    ...opt
+    ...opt,
   }
 
   const window = options.window
   const document = window.document
 
-  let listeners: [string, any][] = []
-  let history: HistoryRecord[] = []
+  const listeners: [string, any][] = []
+  const history: HistoryRecord[] = []
   let at = -1
   let focus = false
-  let callback: (code: string) => void | undefined
+  let onUpdate: (code: string) => void | undefined = () => void 0
   let prev: string // code content prior keydown event
 
   editor.setAttribute('contenteditable', 'plaintext-only')
@@ -56,15 +56,17 @@ export function CodeJar(editor: HTMLElement, highlight: (e: HTMLElement, pos?: P
   editor.style.overflowY = 'auto'
   editor.style.whiteSpace = 'pre-wrap'
 
-  let isLegacy = false // true if plaintext-only is not supported
+  const doHighlight = (editor: HTMLElement, pos?: Position) => {
+    highlight(editor, pos)
+  }
 
-  highlight(editor)
+  let isLegacy = false // true if plaintext-only is not supported
   if (editor.contentEditable !== 'plaintext-only') isLegacy = true
   if (isLegacy) editor.setAttribute('contenteditable', 'true')
 
   const debounceHighlight = debounce(() => {
     const pos = save()
-    highlight(editor, pos)
+    doHighlight(editor, pos)
     restore(pos)
   }, 30)
 
@@ -103,8 +105,7 @@ export function CodeJar(editor: HTMLElement, highlight: (e: HTMLElement, pos?: P
         recording = true
       }
     }
-
-    if (isLegacy) restore(save())
+    if (isLegacy && !isCopy(event)) restore(save())
   })
 
   on('keyup', event => {
@@ -113,7 +114,7 @@ export function CodeJar(editor: HTMLElement, highlight: (e: HTMLElement, pos?: P
 
     if (prev !== toString()) debounceHighlight()
     debounceRecordHistory(event)
-    if (callback) callback(toString())
+    onUpdate(toString())
   })
 
   on('focus', _event => {
@@ -128,7 +129,14 @@ export function CodeJar(editor: HTMLElement, highlight: (e: HTMLElement, pos?: P
     recordHistory()
     handlePaste(event)
     recordHistory()
-    if (callback) callback(toString())
+    onUpdate(toString())
+  })
+
+  on('cut', event => {
+    recordHistory()
+    handleCut(event)
+    recordHistory()
+    onUpdate(toString())
   })
 
   function save(): Position {
@@ -192,9 +200,7 @@ export function CodeJar(editor: HTMLElement, highlight: (e: HTMLElement, pos?: P
       }
     })
 
-    // collapse empty text nodes
-    editor.normalize()
-
+    editor.normalize() // collapse empty text nodes
     return pos
   }
 
@@ -242,7 +248,38 @@ export function CodeJar(editor: HTMLElement, highlight: (e: HTMLElement, pos?: P
       [startNode, startOffset, endNode, endOffset] = [endNode, endOffset, startNode, startOffset]
     }
 
+    {
+      // If nodes not editable, create a text node.
+      const startEl = uneditable(startNode)
+      if (startEl) {
+        const node = document.createTextNode('')
+        startEl.parentNode?.insertBefore(node, startEl)
+        startNode = node
+        startOffset = 0
+      }
+      const endEl = uneditable(endNode)
+      if (endEl) {
+        const node = document.createTextNode('')
+        endEl.parentNode?.insertBefore(node, endEl)
+        endNode = node
+        endOffset = 0
+      }
+    }
+
     s.setBaseAndExtent(startNode, startOffset, endNode, endOffset)
+    editor.normalize() // collapse empty text nodes
+  }
+
+  function uneditable(node: Node): Element | undefined {
+    while (node && node !== editor) {
+      if (node.nodeType === Node.ELEMENT_NODE) {
+        const el = node as Element
+        if (el.getAttribute('contenteditable') == 'false') {
+          return el
+        }
+      }
+      node = node.parentNode!
+    }
   }
 
   function beforeCursor() {
@@ -314,22 +351,7 @@ export function CodeJar(editor: HTMLElement, highlight: (e: HTMLElement, pos?: P
   function handleSelfClosingCharacters(event: KeyboardEvent) {
     const open = `([{'"`
     const close = `)]}'"`
-    const codeAfter = afterCursor()
-    const codeBefore = beforeCursor()
-    const escapeCharacter = codeBefore.substr(codeBefore.length - 1) === '\\'
-    const charAfter = codeAfter.substr(0, 1)
-    if (close.includes(event.key) && !escapeCharacter && charAfter === event.key) {
-      // We already have closing char next to cursor.
-      // Move one char to right.
-      const pos = save()
-      preventDefault(event)
-      pos.start = ++pos.end
-      restore(pos)
-    } else if (
-      open.includes(event.key)
-      && !escapeCharacter
-      && (`"'`.includes(event.key) || ['', ' ', '\n'].includes(charAfter))
-    ) {
+    if (open.includes(event.key)) {
       preventDefault(event)
       const pos = save()
       const wrapText = pos.start == pos.end ? '' : getSelection().toString()
@@ -346,7 +368,7 @@ export function CodeJar(editor: HTMLElement, highlight: (e: HTMLElement, pos?: P
       preventDefault(event)
       if (event.shiftKey) {
         const before = beforeCursor()
-        let [padding, start,] = findPadding(before)
+        let [padding, start] = findPadding(before)
         if (padding.length > 0) {
           const pos = save()
           // Remove full length tab or just remaining padding
@@ -411,14 +433,13 @@ export function CodeJar(editor: HTMLElement, highlight: (e: HTMLElement, pos?: P
   }
 
   function handlePaste(event: ClipboardEvent) {
+    if (event.defaultPrevented) return
     preventDefault(event)
-    const text = ((event as any).originalEvent || event)
-      .clipboardData
-      .getData('text/plain')
-      .replace(/\r/g, '')
+    const originalEvent = (event as any).originalEvent ?? event
+    const text = originalEvent.clipboardData.getData('text/plain').replace(/\r\n?/g, '\n')
     const pos = save()
     insert(text)
-    highlight(editor)
+    doHighlight(editor)
     restore({
       start: Math.min(pos.start, pos.end) + text.length,
       end: Math.min(pos.start, pos.end) + text.length,
@@ -426,21 +447,29 @@ export function CodeJar(editor: HTMLElement, highlight: (e: HTMLElement, pos?: P
     })
   }
 
+  function handleCut(event: ClipboardEvent) {
+    const pos = save()
+    const selection = getSelection()
+    const originalEvent = (event as any).originalEvent ?? event
+    originalEvent.clipboardData.setData('text/plain', selection.toString())
+    document.execCommand('delete')
+    doHighlight(editor)
+    restore({
+      start: Math.min(pos.start, pos.end),
+      end: Math.min(pos.start, pos.end),
+      dir: '<-',
+    })
+    preventDefault(event)
+  }
 
   function visit(editor: HTMLElement, visitor: (el: Node) => 'stop' | undefined) {
     const queue: Node[] = []
-
     if (editor.firstChild) queue.push(editor.firstChild)
-
     let el = queue.pop()
-
     while (el) {
-      if (visitor(el) === 'stop')
-        break
-
+      if (visitor(el) === 'stop') break
       if (el.nextSibling) queue.push(el.nextSibling)
       if (el.firstChild) queue.push(el.firstChild)
-
       el = queue.pop()
     }
   }
@@ -450,11 +479,21 @@ export function CodeJar(editor: HTMLElement, highlight: (e: HTMLElement, pos?: P
   }
 
   function isUndo(event: KeyboardEvent) {
-    return isCtrl(event) && !event.shiftKey && event.code === 'KeyZ'
+    return isCtrl(event) && !event.shiftKey && getKeyCode(event) === 'Z'
   }
 
   function isRedo(event: KeyboardEvent) {
-    return isCtrl(event) && event.shiftKey && event.code === 'KeyZ'
+    return isCtrl(event) && event.shiftKey && getKeyCode(event) === 'Z'
+  }
+
+  function isCopy(event: KeyboardEvent) {
+    return isCtrl(event) && getKeyCode(event) === 'C'
+  }
+
+  function getKeyCode(event: KeyboardEvent): string | undefined {
+    let key = event.key || event.keyCode || event.which
+    if (!key) return undefined
+    return (typeof key === 'string' ? key : String.fromCharCode(key)).toUpperCase()
   }
 
   function insert(text: string) {
@@ -495,22 +534,21 @@ export function CodeJar(editor: HTMLElement, highlight: (e: HTMLElement, pos?: P
   }
 
   function getSelection() {
-    if (editor.parentNode?.nodeType == Node.DOCUMENT_FRAGMENT_NODE) {
-      return (editor.parentNode as Document).getSelection()!
-    }
-    return window.getSelection()!
+    // @ts-ignore
+    return editor.getRootNode().getSelection() as Selection
   }
 
   return {
     updateOptions(newOptions: Partial<Options>) {
       Object.assign(options, newOptions)
     },
-    updateCode(code: string) {
+    updateCode(code: string, callOnUpdate: boolean = true) {
       editor.textContent = code
-      highlight(editor)
+      doHighlight(editor)
+      callOnUpdate && onUpdate(code)
     },
-    onUpdate(cb: (code: string) => void) {
-      callback = cb
+    onUpdate(callback: (code: string) => void) {
+      onUpdate = callback
     },
     toString,
     save,
